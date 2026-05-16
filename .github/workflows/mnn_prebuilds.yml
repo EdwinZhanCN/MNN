@@ -1,0 +1,405 @@
+name: Build MNN Prebuilts
+
+on:
+    push:
+        tags:
+            - "*"
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Tag/version/ref to build, e.g. 3.5.0-rust.1"
+                required: false
+                type: string
+
+permissions:
+    contents: write
+
+env:
+    BASE_CMAKE_ARGS: >-
+        -DMNN_SEP_BUILD=OFF
+        -DMNN_BUILD_TOOLS=OFF
+        -DMNN_BUILD_DEMO=OFF
+        -DMNN_BUILD_TEST=OFF
+        -DMNN_BUILD_BENCHMARK=OFF
+        -DMNN_BUILD_QUANTOOLS=OFF
+        -DMNN_BUILD_CONVERTER=OFF
+        -DMNN_PORTABLE_BUILD=ON
+        -DMNN_OPENCL=ON
+        -DMNN_VULKAN=ON
+
+jobs:
+    setup:
+        runs-on: ubuntu-latest
+        outputs:
+            VERSION: ${{ steps.get_version.outputs.VERSION }}
+            CHECKOUT_REF: ${{ steps.get_version.outputs.CHECKOUT_REF }}
+            IS_RELEASE: ${{ steps.get_version.outputs.IS_RELEASE }}
+        steps:
+            - name: Get version and checkout ref
+              id: get_version
+              shell: bash
+              run: |
+                  if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+                    echo "VERSION=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+                    echo "CHECKOUT_REF=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+                    echo "IS_RELEASE=true" >> "$GITHUB_OUTPUT"
+                  elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+                    echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+                    echo "CHECKOUT_REF=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+                    echo "IS_RELEASE=true" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "VERSION=dev-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+                    echo "CHECKOUT_REF=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+                    echo "IS_RELEASE=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+    # ============================================================
+    # Linux x86_64 — CPU + OpenCL + Vulkan
+    # ============================================================
+    linux-x86_64:
+        needs: [setup]
+        runs-on: ubuntu-latest
+        env:
+            PACKAGE: mnn-${{ needs.setup.outputs.VERSION }}-linux-x86_64
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+                  ref: ${{ needs.setup.outputs.CHECKOUT_REF }}
+
+            - name: Install system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                    build-essential \
+                    cmake \
+                    ninja-build \
+                    ocl-icd-opencl-dev \
+                    opencl-headers
+
+            - name: Install Vulkan SDK
+              uses: lunarg/vulkan-sdk@v1
+              with:
+                  version: "1.4.350"
+
+            - name: Build static
+              run: |
+                  cmake -S . -B build-static -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=OFF \
+                    -DMNN_USE_SSE=ON
+
+                  cmake --build build-static --config Release --target MNN --parallel
+
+            - name: Build dynamic
+              run: |
+                  cmake -S . -B build-dynamic -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=ON \
+                    -DMNN_USE_SSE=ON
+
+                  cmake --build build-dynamic --config Release --target MNN --parallel
+
+            - name: Package
+              shell: bash
+              run: |
+                  set -euxo pipefail
+
+                  mkdir -p "${PACKAGE}/lib" "${PACKAGE}/include" "${PACKAGE}/licenses"
+
+                  cp build-static/libMNN.a "${PACKAGE}/lib/"
+                  cp build-dynamic/libMNN.so "${PACKAGE}/lib/"
+                  cp -r include/MNN "${PACKAGE}/include/"
+
+                  if [[ -f LICENSE ]]; then
+                    cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
+                  fi
+
+                  cat > "${PACKAGE}/metadata.json" <<EOF
+                  {
+                    "name": "MNN",
+                    "version": "${{ needs.setup.outputs.VERSION }}",
+                    "checkout_ref": "${{ needs.setup.outputs.CHECKOUT_REF }}",
+                    "commit": "${{ github.sha }}",
+                    "target": "linux-x86_64",
+                    "arch": "x86_64",
+                    "os": "linux",
+                    "linkage": ["static", "dynamic"],
+                    "backends": ["cpu", "opencl", "vulkan"]
+                  }
+                  EOF
+
+                  echo "Dynamic library dependencies:"
+                  ldd "${PACKAGE}/lib/libMNN.so" || true
+
+                  tar czf "${PACKAGE}.tar.gz" "${PACKAGE}"
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.PACKAGE }}
+                  path: ${{ env.PACKAGE }}.tar.gz
+
+    # ============================================================
+    # Windows x86_64 — CPU + OpenCL + Vulkan
+    # ============================================================
+    windows-x86_64:
+        needs: [setup]
+        runs-on: windows-latest
+        env:
+            PACKAGE: mnn-${{ needs.setup.outputs.VERSION }}-windows-x86_64
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+                  ref: ${{ needs.setup.outputs.CHECKOUT_REF }}
+
+            - uses: ilammy/msvc-dev-cmd@v1
+              with:
+                  arch: x64
+
+            - name: Install Vulkan SDK
+              uses: lunarg/vulkan-sdk@v1
+              with:
+                  version: "1.4.350"
+
+            - name: Setup Ninja
+              uses: seanmiddleditch/gha-setup-ninja@v5
+
+            - name: Build static MT
+              shell: pwsh
+              run: |
+                  cmake -S . -B build-static -G Ninja `
+                    ${{ env.BASE_CMAKE_ARGS }} `
+                    -DCMAKE_BUILD_TYPE=Release `
+                    -DMNN_BUILD_SHARED_LIBS=OFF `
+                    -DMNN_WIN_RUNTIME_MT=ON `
+                    -DMNN_USE_SSE=ON
+
+                  cmake --build build-static --config Release --target MNN --parallel
+
+            - name: Build dynamic MT
+              shell: pwsh
+              run: |
+                  cmake -S . -B build-dynamic -G Ninja `
+                    ${{ env.BASE_CMAKE_ARGS }} `
+                    -DCMAKE_BUILD_TYPE=Release `
+                    -DMNN_BUILD_SHARED_LIBS=ON `
+                    -DMNN_WIN_RUNTIME_MT=ON `
+                    -DMNN_USE_SSE=ON
+
+                  cmake --build build-dynamic --config Release --target MNN --parallel
+
+            - name: Package
+              shell: pwsh
+              run: |
+                  New-Item -ItemType Directory -Force -Path "${{ env.PACKAGE }}/lib" | Out-Null
+                  New-Item -ItemType Directory -Force -Path "${{ env.PACKAGE }}/include" | Out-Null
+                  New-Item -ItemType Directory -Force -Path "${{ env.PACKAGE }}/licenses" | Out-Null
+
+                  Copy-Item build-static/MNN.lib "${{ env.PACKAGE }}/lib/MNN_static.lib"
+                  Copy-Item build-dynamic/MNN.lib "${{ env.PACKAGE }}/lib/MNN.lib"
+                  Copy-Item build-dynamic/MNN.dll "${{ env.PACKAGE }}/lib/MNN.dll"
+                  Copy-Item -Recurse include/MNN "${{ env.PACKAGE }}/include/"
+
+                  if (Test-Path LICENSE) {
+                    Copy-Item LICENSE "${{ env.PACKAGE }}/licenses/MNN-LICENSE.txt"
+                  }
+
+                  @"
+                  {
+                    "name": "MNN",
+                    "version": "${{ needs.setup.outputs.VERSION }}",
+                    "checkout_ref": "${{ needs.setup.outputs.CHECKOUT_REF }}",
+                    "commit": "${{ github.sha }}",
+                    "target": "windows-x86_64",
+                    "arch": "x86_64",
+                    "os": "windows",
+                    "linkage": ["static", "dynamic"],
+                    "backends": ["cpu", "opencl", "vulkan"],
+                    "runtime": "MT"
+                  }
+                  "@ | Out-File -Encoding utf8 "${{ env.PACKAGE }}/metadata.json"
+
+                  Compress-Archive -Path "${{ env.PACKAGE }}" -DestinationPath "${{ env.PACKAGE }}.zip" -Force
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.PACKAGE }}
+                  path: ${{ env.PACKAGE }}.zip
+
+    # ============================================================
+    # macOS Universal — CPU + OpenCL + Metal + Vulkan
+    # ============================================================
+    macos-universal:
+        needs: [setup]
+        runs-on: macos-latest
+        env:
+            PACKAGE: mnn-${{ needs.setup.outputs.VERSION }}-macos-universal
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+                  ref: ${{ needs.setup.outputs.CHECKOUT_REF }}
+
+            - name: Install Vulkan SDK with MoltenVK
+              uses: lunarg/vulkan-sdk@v1
+              with:
+                  version: "1.4.350"
+
+            - name: Build static arm64
+              run: |
+                  cmake -S . -B build-static-arm64 -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=OFF \
+                    -DMNN_USE_SSE=OFF \
+                    -DMNN_METAL=ON \
+                    -DMNN_ARM82=ON \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64
+
+                  cmake --build build-static-arm64 --config Release --target MNN --parallel
+
+            - name: Build static x86_64
+              run: |
+                  cmake -S . -B build-static-x64 -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=OFF \
+                    -DMNN_USE_SSE=ON \
+                    -DMNN_METAL=ON \
+                    -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+                  cmake --build build-static-x64 --config Release --target MNN --parallel
+
+            - name: Build dynamic arm64
+              run: |
+                  cmake -S . -B build-dynamic-arm64 -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=ON \
+                    -DMNN_USE_SSE=OFF \
+                    -DMNN_METAL=ON \
+                    -DMNN_ARM82=ON \
+                    -DCMAKE_OSX_ARCHITECTURES=arm64
+
+                  cmake --build build-dynamic-arm64 --config Release --target MNN --parallel
+
+            - name: Build dynamic x86_64
+              run: |
+                  cmake -S . -B build-dynamic-x64 -G Ninja \
+                    ${{ env.BASE_CMAKE_ARGS }} \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -DMNN_BUILD_SHARED_LIBS=ON \
+                    -DMNN_USE_SSE=ON \
+                    -DMNN_METAL=ON \
+                    -DCMAKE_OSX_ARCHITECTURES=x86_64
+
+                  cmake --build build-dynamic-x64 --config Release --target MNN --parallel
+
+            - name: Create universal binaries and package
+              shell: bash
+              run: |
+                  set -euxo pipefail
+
+                  mkdir -p "${PACKAGE}/lib" "${PACKAGE}/include" "${PACKAGE}/licenses"
+
+                  lipo -create \
+                    build-static-arm64/libMNN.a \
+                    build-static-x64/libMNN.a \
+                    -output "${PACKAGE}/lib/libMNN.a"
+
+                  lipo -create \
+                    build-dynamic-arm64/libMNN.dylib \
+                    build-dynamic-x64/libMNN.dylib \
+                    -output "${PACKAGE}/lib/libMNN.dylib"
+
+                  cp -r include/MNN "${PACKAGE}/include/"
+
+                  if [[ -f LICENSE ]]; then
+                    cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
+                  fi
+
+                  cat > "${PACKAGE}/metadata.json" <<EOF
+                  {
+                    "name": "MNN",
+                    "version": "${{ needs.setup.outputs.VERSION }}",
+                    "checkout_ref": "${{ needs.setup.outputs.CHECKOUT_REF }}",
+                    "commit": "${{ github.sha }}",
+                    "target": "macos-universal",
+                    "arch": ["x86_64", "arm64"],
+                    "os": "macos",
+                    "linkage": ["static", "dynamic"],
+                    "backends": ["cpu", "opencl", "metal", "vulkan"]
+                  }
+                  EOF
+
+                  echo "Dynamic library dependencies:"
+                  otool -L "${PACKAGE}/lib/libMNN.dylib" || true
+
+                  tar czf "${PACKAGE}.tar.gz" "${PACKAGE}"
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.PACKAGE }}
+                  path: ${{ env.PACKAGE }}.tar.gz
+
+    # ============================================================
+    # Upload all artifacts to GitHub Release
+    # ============================================================
+    release:
+        needs:
+            - setup
+            - linux-x86_64
+            - windows-x86_64
+            - macos-universal
+        if: ${{ needs.setup.outputs.IS_RELEASE == 'true' }}
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+                  merge-multiple: true
+
+            - name: List artifacts
+              run: |
+                  ls -lh artifacts/
+
+            - name: Generate checksums
+              run: |
+                  cd artifacts
+                  sha256sum * > checksums.txt
+                  cat checksums.txt
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ needs.setup.outputs.VERSION }}
+                  name: MNN Prebuilts ${{ needs.setup.outputs.VERSION }}
+                  body: |
+                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }}.
+
+                      Built from ref: `${{ needs.setup.outputs.CHECKOUT_REF }}`
+                      Commit: `${{ github.sha }}`
+
+                      | Package | OS | Arch | Backends |
+                      |---------|----|------|----------|
+                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan |
+                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan |
+                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan |
+
+                      Each package contains:
+
+                      - `lib/`
+                      - `include/MNN/`
+                      - `licenses/`
+                      - `metadata.json`
+
+                      Notes:
+
+                      - Dynamic libraries may require system GPU runtime libraries at runtime.
+                      - Static libraries may require your consumer project to link platform GPU/runtime libraries.
+                      - macOS OpenCL is deprecated by Apple but still available as a framework on current macOS SDKs.
+                  files: artifacts/*
+                  draft: false
