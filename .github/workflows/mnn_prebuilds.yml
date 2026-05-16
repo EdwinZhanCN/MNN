@@ -3,7 +3,7 @@ name: Build MNN Prebuilts
 on:
     push:
         tags:
-            - "*"
+            - "*-lumnn*"
     workflow_dispatch:
         inputs:
             tag:
@@ -77,10 +77,11 @@ jobs:
                     ocl-icd-opencl-dev \
                     opencl-headers
 
-            - name: Install Vulkan SDK
-              uses: lunarg/vulkan-sdk@v1
+            - name: Setup Vulkan SDK
+              uses: humbletim/setup-vulkan-sdk@v1.2.1
               with:
-                  version: "1.4.350"
+                  version: "1.4.350.0"
+                  cache: true
 
             - name: Build static
               run: |
@@ -159,10 +160,11 @@ jobs:
               with:
                   arch: x64
 
-            - name: Install Vulkan SDK
-              uses: lunarg/vulkan-sdk@v1
+            - name: Setup Vulkan SDK
+              uses: humbletim/setup-vulkan-sdk@v1.2.1
               with:
-                  version: "1.4.350"
+                  version: "1.4.350.0"
+                  cache: true
 
             - name: Setup Ninja
               uses: seanmiddleditch/gha-setup-ninja@v5
@@ -243,10 +245,11 @@ jobs:
                   submodules: recursive
                   ref: ${{ needs.setup.outputs.CHECKOUT_REF }}
 
-            - name: Install Vulkan SDK with MoltenVK
-              uses: lunarg/vulkan-sdk@v1
+            - name: Setup Vulkan SDK
+              uses: humbletim/setup-vulkan-sdk@v1.2.1
               with:
-                  version: "1.4.350"
+                  version: "1.4.350.0"
+                  cache: true
 
             - name: Build static arm64
               run: |
