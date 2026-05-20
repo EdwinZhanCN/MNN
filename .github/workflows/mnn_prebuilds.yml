@@ -7,7 +7,7 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: "Tag/version/ref to build, e.g. 3.5.0-rust.1"
+                description: "Tag/version/ref to build, e.g. 3.5.0-lumnn"
                 required: false
                 type: string
 
@@ -17,6 +17,7 @@ permissions:
 env:
     BASE_CMAKE_ARGS: >-
         -DMNN_SEP_BUILD=OFF
+        -DMNN_BUILD_LLM=ON
         -DMNN_BUILD_TOOLS=OFF
         -DMNN_BUILD_DEMO=OFF
         -DMNN_BUILD_TEST=OFF
@@ -53,9 +54,6 @@ jobs:
                     echo "IS_RELEASE=false" >> "$GITHUB_OUTPUT"
                   fi
 
-    # ============================================================
-    # Linux x86_64 — CPU + OpenCL + Vulkan
-    # ============================================================
     linux-x86_64:
         needs: [setup]
         runs-on: ubuntu-latest
@@ -91,7 +89,7 @@ jobs:
                     -DMNN_BUILD_SHARED_LIBS=OFF \
                     -DMNN_USE_SSE=ON
 
-                  cmake --build build-static --config Release --target MNN --parallel
+                  cmake --build build-static --config Release --parallel
 
             - name: Build dynamic
               run: |
@@ -101,7 +99,7 @@ jobs:
                     -DMNN_BUILD_SHARED_LIBS=ON \
                     -DMNN_USE_SSE=ON
 
-                  cmake --build build-dynamic --config Release --target MNN --parallel
+                  cmake --build build-dynamic --config Release --parallel
 
             - name: Package
               shell: bash
@@ -113,6 +111,14 @@ jobs:
                   cp build-static/libMNN.a "${PACKAGE}/lib/"
                   cp build-dynamic/libMNN.so "${PACKAGE}/lib/"
                   cp -r include/MNN "${PACKAGE}/include/"
+
+                  if [[ -d transformers/llm/engine/include/llm ]]; then
+                    mkdir -p "${PACKAGE}/include/MNN"
+                    cp -r transformers/llm/engine/include/llm "${PACKAGE}/include/MNN/"
+                  fi
+
+                  find build-static -name 'libllm.a' -exec cp {} "${PACKAGE}/lib/" \; -quit
+                  find build-dynamic -name 'libllm.so' -exec cp {} "${PACKAGE}/lib/" \; -quit
 
                   if [[ -f LICENSE ]]; then
                     cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
@@ -128,12 +134,16 @@ jobs:
                     "arch": "x86_64",
                     "os": "linux",
                     "linkage": ["static", "dynamic"],
-                    "backends": ["cpu", "opencl", "vulkan"]
+                    "backends": ["cpu", "opencl", "vulkan"],
+                    "features": ["llm"]
                   }
                   EOF
 
                   echo "Dynamic library dependencies:"
                   ldd "${PACKAGE}/lib/libMNN.so" || true
+                  if [[ -f "${PACKAGE}/lib/libllm.so" ]]; then
+                    ldd "${PACKAGE}/lib/libllm.so" || true
+                  fi
 
                   tar czf "${PACKAGE}.tar.gz" "${PACKAGE}"
 
@@ -142,9 +152,6 @@ jobs:
                   name: ${{ env.PACKAGE }}
                   path: ${{ env.PACKAGE }}.tar.gz
 
-    # ============================================================
-    # Windows x86_64 — CPU + OpenCL + Vulkan
-    # ============================================================
     windows-x86_64:
         needs: [setup]
         runs-on: windows-latest
@@ -179,7 +186,7 @@ jobs:
                     -DMNN_WIN_RUNTIME_MT=ON `
                     -DMNN_USE_SSE=ON
 
-                  cmake --build build-static --config Release --target MNN --parallel
+                  cmake --build build-static --config Release --parallel
 
             - name: Build dynamic MT
               shell: pwsh
@@ -191,7 +198,7 @@ jobs:
                     -DMNN_WIN_RUNTIME_MT=ON `
                     -DMNN_USE_SSE=ON
 
-                  cmake --build build-dynamic --config Release --target MNN --parallel
+                  cmake --build build-dynamic --config Release --parallel
 
             - name: Package
               shell: pwsh
@@ -204,6 +211,21 @@ jobs:
                   Copy-Item build-dynamic/MNN.lib "${{ env.PACKAGE }}/lib/MNN.lib"
                   Copy-Item build-dynamic/MNN.dll "${{ env.PACKAGE }}/lib/MNN.dll"
                   Copy-Item -Recurse include/MNN "${{ env.PACKAGE }}/include/"
+
+                  Get-ChildItem build-static -Recurse -Filter llm.lib | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/llm_static.lib"
+                  }
+                  Get-ChildItem build-dynamic -Recurse -Filter llm.lib | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/llm.lib"
+                  }
+                  Get-ChildItem build-dynamic -Recurse -Filter llm.dll | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/llm.dll"
+                  }
+
+                  if (Test-Path transformers/llm/engine/include/llm) {
+                    New-Item -ItemType Directory -Force -Path "${{ env.PACKAGE }}/include/MNN" | Out-Null
+                    Copy-Item -Recurse transformers/llm/engine/include/llm "${{ env.PACKAGE }}/include/MNN/"
+                  }
 
                   if (Test-Path LICENSE) {
                     Copy-Item LICENSE "${{ env.PACKAGE }}/licenses/MNN-LICENSE.txt"
@@ -220,6 +242,7 @@ jobs:
                     "os": "windows",
                     "linkage": ["static", "dynamic"],
                     "backends": ["cpu", "opencl", "vulkan"],
+                    "features": ["llm"],
                     "runtime": "MT"
                   }
                   "@ | Out-File -Encoding utf8 "${{ env.PACKAGE }}/metadata.json"
@@ -231,9 +254,6 @@ jobs:
                   name: ${{ env.PACKAGE }}
                   path: ${{ env.PACKAGE }}.zip
 
-    # ============================================================
-    # macOS Universal — CPU + OpenCL + Metal + Vulkan
-    # ============================================================
     macos-universal:
         needs: [setup]
         runs-on: macos-latest
@@ -262,7 +282,7 @@ jobs:
                     -DMNN_ARM82=ON \
                     -DCMAKE_OSX_ARCHITECTURES=arm64
 
-                  cmake --build build-static-arm64 --config Release --target MNN --parallel
+                  cmake --build build-static-arm64 --config Release --parallel
 
             - name: Build static x86_64
               run: |
@@ -274,7 +294,7 @@ jobs:
                     -DMNN_METAL=ON \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64
 
-                  cmake --build build-static-x64 --config Release --target MNN --parallel
+                  cmake --build build-static-x64 --config Release --parallel
 
             - name: Build dynamic arm64
               run: |
@@ -287,7 +307,7 @@ jobs:
                     -DMNN_ARM82=ON \
                     -DCMAKE_OSX_ARCHITECTURES=arm64
 
-                  cmake --build build-dynamic-arm64 --config Release --target MNN --parallel
+                  cmake --build build-dynamic-arm64 --config Release --parallel
 
             - name: Build dynamic x86_64
               run: |
@@ -299,7 +319,7 @@ jobs:
                     -DMNN_METAL=ON \
                     -DCMAKE_OSX_ARCHITECTURES=x86_64
 
-                  cmake --build build-dynamic-x64 --config Release --target MNN --parallel
+                  cmake --build build-dynamic-x64 --config Release --parallel
 
             - name: Create universal binaries and package
               shell: bash
@@ -318,7 +338,26 @@ jobs:
                     build-dynamic-x64/libMNN.dylib \
                     -output "${PACKAGE}/lib/libMNN.dylib"
 
+                  if [[ -f build-static-arm64/libllm.a && -f build-static-x64/libllm.a ]]; then
+                    lipo -create \
+                      build-static-arm64/libllm.a \
+                      build-static-x64/libllm.a \
+                      -output "${PACKAGE}/lib/libllm.a"
+                  fi
+
+                  if [[ -f build-dynamic-arm64/libllm.dylib && -f build-dynamic-x64/libllm.dylib ]]; then
+                    lipo -create \
+                      build-dynamic-arm64/libllm.dylib \
+                      build-dynamic-x64/libllm.dylib \
+                      -output "${PACKAGE}/lib/libllm.dylib"
+                  fi
+
                   cp -r include/MNN "${PACKAGE}/include/"
+
+                  if [[ -d transformers/llm/engine/include/llm ]]; then
+                    mkdir -p "${PACKAGE}/include/MNN"
+                    cp -r transformers/llm/engine/include/llm "${PACKAGE}/include/MNN/"
+                  fi
 
                   if [[ -f LICENSE ]]; then
                     cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
@@ -334,12 +373,16 @@ jobs:
                     "arch": ["x86_64", "arm64"],
                     "os": "macos",
                     "linkage": ["static", "dynamic"],
-                    "backends": ["cpu", "opencl", "metal", "vulkan"]
+                    "backends": ["cpu", "opencl", "metal", "vulkan"],
+                    "features": ["llm"]
                   }
                   EOF
 
                   echo "Dynamic library dependencies:"
                   otool -L "${PACKAGE}/lib/libMNN.dylib" || true
+                  if [[ -f "${PACKAGE}/lib/libllm.dylib" ]]; then
+                    otool -L "${PACKAGE}/lib/libllm.dylib" || true
+                  fi
 
                   tar czf "${PACKAGE}.tar.gz" "${PACKAGE}"
 
@@ -348,9 +391,6 @@ jobs:
                   name: ${{ env.PACKAGE }}
                   path: ${{ env.PACKAGE }}.tar.gz
 
-    # ============================================================
-    # Upload all artifacts to GitHub Release
-    # ============================================================
     release:
         needs:
             - setup
@@ -381,16 +421,16 @@ jobs:
                   tag_name: ${{ needs.setup.outputs.VERSION }}
                   name: MNN Prebuilts ${{ needs.setup.outputs.VERSION }}
                   body: |
-                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }}.
+                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }} with LLM support.
 
                       Built from ref: `${{ needs.setup.outputs.CHECKOUT_REF }}`
                       Commit: `${{ github.sha }}`
 
-                      | Package | OS | Arch | Backends |
-                      |---------|----|------|----------|
-                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan |
-                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan |
-                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan |
+                      | Package | OS | Arch | Backends | Features |
+                      |---------|----|------|----------|----------|
+                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan | LLM |
+                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan | LLM |
+                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan | LLM |
 
                       Each package contains:
 
@@ -401,6 +441,7 @@ jobs:
 
                       Notes:
 
+                      - Built with `MNN_BUILD_LLM=ON`.
                       - Dynamic libraries may require system GPU runtime libraries at runtime.
                       - Static libraries may require your consumer project to link platform GPU/runtime libraries.
                       - macOS OpenCL is deprecated by Apple but still available as a framework on current macOS SDKs.
