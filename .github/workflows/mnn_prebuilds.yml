@@ -7,7 +7,7 @@ on:
     workflow_dispatch:
         inputs:
             tag:
-                description: "Tag/version/ref to build, e.g. 3.5.0-lumnn"
+                description: "Tag/version/ref to build, e.g. 3.5.0-lumnn.llm.omni"
                 required: false
                 type: string
 
@@ -18,6 +18,13 @@ env:
     BASE_CMAKE_ARGS: >-
         -DMNN_SEP_BUILD=OFF
         -DMNN_BUILD_LLM=ON
+        -DMNN_BUILD_LLM_OMNI=ON
+        -DMNN_BUILD_OPENCV=ON
+        -DMNN_IMGCODECS=ON
+        -DMNN_BUILD_AUDIO=ON
+        -DMNN_LOW_MEMORY=ON
+        -DMNN_SUPPORT_TRANSFORMER_FUSE=ON
+        -DMNN_SUPPORT_BF16=ON
         -DMNN_BUILD_TOOLS=OFF
         -DMNN_BUILD_DEMO=OFF
         -DMNN_BUILD_TEST=OFF
@@ -73,7 +80,10 @@ jobs:
                     cmake \
                     ninja-build \
                     ocl-icd-opencl-dev \
-                    opencl-headers
+                    opencl-headers \
+                    zlib1g-dev \
+                    libjpeg-dev \
+                    libpng-dev
 
             - name: Setup Vulkan SDK
               uses: humbletim/setup-vulkan-sdk@v1.2.1
@@ -119,6 +129,15 @@ jobs:
 
                   find build-static -name 'libllm.a' -exec cp {} "${PACKAGE}/lib/" \; -quit
                   find build-dynamic -name 'libllm.so' -exec cp {} "${PACKAGE}/lib/" \; -quit
+                  find build-static -name 'libMNN_Express.a' -exec cp {} "${PACKAGE}/lib/" \; -quit
+                  find build-dynamic -name 'libMNN_Express.so' -exec cp {} "${PACKAGE}/lib/" \; -quit
+
+                  test -f "${PACKAGE}/include/MNN/llm/llm.hpp"
+
+                  if ! { nm -gC "${PACKAGE}/lib/libMNN.a" || true; if [[ -f "${PACKAGE}/lib/libllm.a" ]]; then nm -gC "${PACKAGE}/lib/libllm.a" || true; fi; } | grep -q "MNN::Transformer::Omni::tokenizer_encode"; then
+                    echo "Missing MNN Omni multimodal symbols"
+                    exit 1
+                  fi
 
                   if [[ -f LICENSE ]]; then
                     cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
@@ -135,7 +154,7 @@ jobs:
                     "os": "linux",
                     "linkage": ["static", "dynamic"],
                     "backends": ["cpu", "opencl", "vulkan"],
-                    "features": ["llm"]
+                    "features": ["llm", "llm-omni", "vision", "audio", "bf16"]
                   }
                   EOF
 
@@ -221,10 +240,23 @@ jobs:
                   Get-ChildItem build-dynamic -Recurse -Filter llm.dll | Select-Object -First 1 | ForEach-Object {
                     Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/llm.dll"
                   }
+                  Get-ChildItem build-static -Recurse -Filter MNN_Express.lib | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/MNN_Express_static.lib"
+                  }
+                  Get-ChildItem build-dynamic -Recurse -Filter MNN_Express.lib | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/MNN_Express.lib"
+                  }
+                  Get-ChildItem build-dynamic -Recurse -Filter MNN_Express.dll | Select-Object -First 1 | ForEach-Object {
+                    Copy-Item $_.FullName "${{ env.PACKAGE }}/lib/MNN_Express.dll"
+                  }
 
                   if (Test-Path transformers/llm/engine/include/llm) {
                     New-Item -ItemType Directory -Force -Path "${{ env.PACKAGE }}/include/MNN" | Out-Null
                     Copy-Item -Recurse transformers/llm/engine/include/llm "${{ env.PACKAGE }}/include/MNN/"
+                  }
+
+                  if (!(Test-Path "${{ env.PACKAGE }}/include/MNN/llm/llm.hpp")) {
+                    throw "Missing packaged MNN LLM headers"
                   }
 
                   if (Test-Path LICENSE) {
@@ -242,7 +274,7 @@ jobs:
                     "os": "windows",
                     "linkage": ["static", "dynamic"],
                     "backends": ["cpu", "opencl", "vulkan"],
-                    "features": ["llm"],
+                    "features": ["llm", "llm-omni", "vision", "audio", "bf16"],
                     "runtime": "MT"
                   }
                   "@ | Out-File -Encoding utf8 "${{ env.PACKAGE }}/metadata.json"
@@ -352,11 +384,32 @@ jobs:
                       -output "${PACKAGE}/lib/libllm.dylib"
                   fi
 
+                  if [[ -f build-static-arm64/libMNN_Express.a && -f build-static-x64/libMNN_Express.a ]]; then
+                    lipo -create \
+                      build-static-arm64/libMNN_Express.a \
+                      build-static-x64/libMNN_Express.a \
+                      -output "${PACKAGE}/lib/libMNN_Express.a"
+                  fi
+
+                  if [[ -f build-dynamic-arm64/libMNN_Express.dylib && -f build-dynamic-x64/libMNN_Express.dylib ]]; then
+                    lipo -create \
+                      build-dynamic-arm64/libMNN_Express.dylib \
+                      build-dynamic-x64/libMNN_Express.dylib \
+                      -output "${PACKAGE}/lib/libMNN_Express.dylib"
+                  fi
+
                   cp -r include/MNN "${PACKAGE}/include/"
 
                   if [[ -d transformers/llm/engine/include/llm ]]; then
                     mkdir -p "${PACKAGE}/include/MNN"
                     cp -r transformers/llm/engine/include/llm "${PACKAGE}/include/MNN/"
+                  fi
+
+                  test -f "${PACKAGE}/include/MNN/llm/llm.hpp"
+
+                  if ! { nm -gU "${PACKAGE}/lib/libMNN.a" | c++filt || true; if [[ -f "${PACKAGE}/lib/libllm.a" ]]; then nm -gU "${PACKAGE}/lib/libllm.a" | c++filt || true; fi; } | grep -q "MNN::Transformer::Omni::tokenizer_encode"; then
+                    echo "Missing MNN Omni multimodal symbols"
+                    exit 1
                   fi
 
                   if [[ -f LICENSE ]]; then
@@ -374,7 +427,7 @@ jobs:
                     "os": "macos",
                     "linkage": ["static", "dynamic"],
                     "backends": ["cpu", "opencl", "metal", "vulkan"],
-                    "features": ["llm"]
+                    "features": ["llm", "llm-omni", "vision", "audio", "bf16"]
                   }
                   EOF
 
@@ -421,16 +474,16 @@ jobs:
                   tag_name: ${{ needs.setup.outputs.VERSION }}
                   name: MNN Prebuilts ${{ needs.setup.outputs.VERSION }}
                   body: |
-                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }} with LLM support.
+                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }} with LLM + Omni multimodal support.
 
                       Built from ref: `${{ needs.setup.outputs.CHECKOUT_REF }}`
                       Commit: `${{ github.sha }}`
 
                       | Package | OS | Arch | Backends | Features |
                       |---------|----|------|----------|----------|
-                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan | LLM |
-                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan | LLM |
-                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan | LLM |
+                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan | LLM + Omni + Vision + Audio + BF16 |
+                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan | LLM + Omni + Vision + Audio + BF16 |
+                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan | LLM + Omni + Vision + Audio + BF16 |
 
                       Each package contains:
 
@@ -441,7 +494,8 @@ jobs:
 
                       Notes:
 
-                      - Built with `MNN_BUILD_LLM=ON`.
+                      - Built with `MNN_BUILD_LLM=ON` and `MNN_BUILD_LLM_OMNI=ON`.
+                      - `MNN_BUILD_LLM_OMNI=ON` is the official CMake path for image/audio multimodal support.
                       - Dynamic libraries may require system GPU runtime libraries at runtime.
                       - Static libraries may require your consumer project to link platform GPU/runtime libraries.
                       - macOS OpenCL is deprecated by Apple but still available as a framework on current macOS SDKs.
