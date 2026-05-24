@@ -169,6 +169,112 @@ jobs:
               with:
                   name: ${{ env.PACKAGE }}
                   path: ${{ env.PACKAGE }}.tar.gz
+    linux-aarch64:
+        needs: [setup]
+        runs-on: ubuntu-24.04-arm
+        env:
+            PACKAGE: mnn-${{ needs.setup.outputs.VERSION }}-linux-aarch64
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  submodules: recursive
+                  ref: ${{ needs.setup.outputs.CHECKOUT_REF }}
+
+            - name: Install system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y \
+                      build-essential \
+                      cmake \
+                      ninja-build \
+                      ocl-icd-opencl-dev \
+                      opencl-headers \
+                      libvulkan-dev \
+                      vulkan-headers \
+                      zlib1g-dev \
+                      libjpeg-dev \
+                      libpng-dev
+
+            - name: Build dynamic
+              run: |
+                  cmake -S . -B build-dynamic -G Ninja \
+                      ${{ env.BASE_CMAKE_ARGS }} \
+                      -DCMAKE_BUILD_TYPE=Release \
+                      -DMNN_BUILD_SHARED_LIBS=ON \
+                      -DMNN_USE_SSE=OFF \
+                      -DMNN_ARM82=ON
+
+                  cmake --build build-dynamic --config Release --parallel
+
+            - name: Package
+              shell: bash
+              run: |
+                  set -euxo pipefail
+
+                  mkdir -p "${PACKAGE}/lib" "${PACKAGE}/include" "${PACKAGE}/licenses"
+
+                  cp build-dynamic/libMNN.so "${PACKAGE}/lib/"
+                  cp -r include/MNN "${PACKAGE}/include/"
+
+                  if [[ -d transformers/llm/engine/include/llm ]]; then
+                      mkdir -p "${PACKAGE}/include/MNN"
+                      cp -r transformers/llm/engine/include/llm "${PACKAGE}/include/MNN/"
+                  fi
+
+                  # MNN_SEP_BUILD=OFF may not emit separate libllm / MNN_Express libraries.
+                  # Package them if present, but do not fail if they are absent.
+                  find build-dynamic -name 'libllm.so' -exec cp {} "${PACKAGE}/lib/" \; -quit || true
+                  find build-dynamic -name 'libMNN_Express.so' -exec cp {} "${PACKAGE}/lib/" \; -quit || true
+
+                  test -f "${PACKAGE}/include/MNN/llm/llm.hpp"
+                  test -f "${PACKAGE}/lib/libMNN.so"
+
+                  if [[ -f LICENSE ]]; then
+                      cp LICENSE "${PACKAGE}/licenses/MNN-LICENSE.txt"
+                  fi
+
+                  cat > "${PACKAGE}/metadata.json" <<EOF
+                  {
+                      "name": "MNN",
+                      "version": "${{ needs.setup.outputs.VERSION }}",
+                      "checkout_ref": "${{ needs.setup.outputs.CHECKOUT_REF }}",
+                      "commit": "${{ github.sha }}",
+                      "target": "linux-aarch64",
+                      "arch": "aarch64",
+                      "os": "linux",
+                      "linkage": ["dynamic"],
+                      "separate_build": false,
+                      "backends": ["cpu", "opencl", "vulkan"],
+                      "features": ["llm", "llm-omni", "vision", "audio", "bf16", "arm82"],
+                      "cmake": {
+                      "MNN_BUILD_SHARED_LIBS": "ON",
+                      "MNN_SEP_BUILD": "OFF",
+                      "MNN_BUILD_LLM": "ON",
+                      "MNN_BUILD_LLM_OMNI": "ON",
+                      "MNN_ARM82": "ON",
+                      "MNN_USE_SSE": "OFF"
+                      }
+                  }
+                  EOF
+
+                  echo "Packaged libraries:"
+                  find "${PACKAGE}/lib" -maxdepth 1 -type f -print
+
+                  echo "Dynamic library dependencies:"
+                  ldd "${PACKAGE}/lib/libMNN.so" || true
+                  if [[ -f "${PACKAGE}/lib/libllm.so" ]]; then
+                      ldd "${PACKAGE}/lib/libllm.so" || true
+                  fi
+                  if [[ -f "${PACKAGE}/lib/libMNN_Express.so" ]]; then
+                      ldd "${PACKAGE}/lib/libMNN_Express.so" || true
+                  fi
+
+                  tar czf "${PACKAGE}.tar.gz" "${PACKAGE}"
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: ${{ env.PACKAGE }}
+                  path: ${{ env.PACKAGE }}.tar.gz
 
     windows-x86_64:
         needs: [setup]
@@ -439,34 +545,49 @@ jobs:
                   tag_name: ${{ needs.setup.outputs.VERSION }}
                   name: MNN Prebuilts ${{ needs.setup.outputs.VERSION }}
                   body: |
-                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }} with LLM + Omni multimodal support.
+                      Prebuilt MNN ${{ needs.setup.outputs.VERSION }} dynamic libraries for LLM and Omni multimodal inference.
 
                       Built from ref: `${{ needs.setup.outputs.CHECKOUT_REF }}`
                       Commit: `${{ github.sha }}`
 
-                      | Package | OS | Arch | Backends | Features |
-                      |---------|----|------|----------|----------|
-                      | `linux-x86_64` | Linux | x86_64 | CPU + OpenCL + Vulkan | LLM + Omni + Vision + Audio + BF16 |
-                      | `windows-x86_64` | Windows | x86_64 | CPU + OpenCL + Vulkan | LLM + Omni + Vision + Audio + BF16 |
-                      | `macos-universal` | macOS | x86_64 + arm64 | CPU + OpenCL + Metal + Vulkan | LLM + Omni + Vision + Audio + BF16 |
+                      ## Downloads
+
+                      | Artifact | OS | Arch | Archive | Backends | Highlights |
+                      |----------|----|------|---------|----------|------------|
+                      | `mnn-${{ needs.setup.outputs.VERSION }}-linux-x86_64` | Linux | x86_64 | `.tar.gz` | CPU + OpenCL + Vulkan | SSE, LLM, Omni, Vision, Audio, BF16 |
+                      | `mnn-${{ needs.setup.outputs.VERSION }}-linux-aarch64` | Linux | aarch64 | `.tar.gz` | CPU + OpenCL + Vulkan | ARM82, LLM, Omni, Vision, Audio, BF16 |
+                      | `mnn-${{ needs.setup.outputs.VERSION }}-windows-x86_64` | Windows | x86_64 | `.zip` | CPU + OpenCL + Vulkan | MSVC MT runtime, SSE, LLM, Omni, Vision, Audio, BF16 |
+                      | `mnn-${{ needs.setup.outputs.VERSION }}-macos-universal` | macOS | x86_64 + arm64 | `.tar.gz` | CPU + OpenCL + Metal + Vulkan | Universal binary, ARM82 on arm64, LLM, Omni, Vision, Audio, BF16 |
+
+                      `checksums.txt` contains SHA-256 checksums for all uploaded artifacts.
+
+                      ## Package contents
 
                       Each package contains:
 
-                      - `lib/` — dynamic MNN runtime libraries only
-                          - Linux: `.so`
-                          - macOS: `.dylib`
-                          - Windows: `.dll` + import `.lib`
-                      - `include/MNN/`
+                      - `lib/` — dynamic MNN runtime libraries
+                          - Linux: `libMNN.so` and optional `libllm.so` / `libMNN_Express.so` if emitted by the build
+                          - macOS: `libMNN.dylib` and optional `libllm.dylib` / `libMNN_Express.dylib` if emitted by both arch builds
+                          - Windows: `MNN.dll` + `MNN.lib` and optional `llm` / `MNN_Express` DLL/import libraries if emitted by the build
+                      - `include/MNN/` — public MNN headers plus LLM headers
                       - `licenses/`
-                      - `metadata.json`
+                      - `metadata.json` — target, backend, feature, and CMake option metadata
 
-                      Notes:
+                      ## Build configuration
 
-                      - Built with `MNN_BUILD_SHARED_LIBS=ON`.
-                      - Built with `MNN_SEP_BUILD=OFF`; LLM / Omni components may be linked into the main MNN dynamic library rather than emitted as separate `libllm` libraries.
-                      - Built with `MNN_BUILD_LLM=ON` and `MNN_BUILD_LLM_OMNI=ON`.
-                      - `MNN_BUILD_LLM_OMNI=ON` enables multimodal LLM support with image/audio-related components.
+                      - Dynamic-library build: `MNN_BUILD_SHARED_LIBS=ON`.
+                      - Unified build: `MNN_SEP_BUILD=OFF`; LLM / Omni components may be linked into the main MNN dynamic library instead of separate `libllm` / `MNN_Express` libraries.
+                      - LLM and multimodal support: `MNN_BUILD_LLM=ON`, `MNN_BUILD_LLM_OMNI=ON`.
+                      - Vision/audio support: `MNN_BUILD_OPENCV=ON`, `MNN_IMGCODECS=ON`, `MNN_BUILD_AUDIO=ON`.
+                      - Runtime optimizations: `MNN_LOW_MEMORY=ON`, `MNN_SUPPORT_TRANSFORMER_FUSE=ON`, `MNN_SUPPORT_BF16=ON`, `MNN_CPU_WEIGHT_DEQUANT_GEMM=ON`.
+                      - GPU backends: `MNN_OPENCL=ON`, `MNN_VULKAN=ON`; macOS additionally enables `MNN_METAL=ON`.
+                      - Tools, demos, tests, benchmarks, quant tools, and converter are disabled to keep packages small.
+
+                      ## Notes
+
                       - Dynamic libraries may require system GPU runtime libraries at runtime.
+                      - Linux aarch64 and macOS arm64 builds enable `MNN_ARM82=ON`; x86_64 builds enable `MNN_USE_SSE=ON`.
+                      - Windows prebuilts are built with `MNN_WIN_RUNTIME_MT=ON`.
                       - macOS OpenCL is deprecated by Apple but still available as a framework on current macOS SDKs.
                   files: artifacts/*
                   draft: false
