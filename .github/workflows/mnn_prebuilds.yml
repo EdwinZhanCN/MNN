@@ -518,6 +518,7 @@ jobs:
         needs:
             - setup
             - linux-x86_64
+            - linux-aarch64
             - windows-x86_64
             - macos-universal
         if: ${{ needs.setup.outputs.IS_RELEASE == 'true' }}
