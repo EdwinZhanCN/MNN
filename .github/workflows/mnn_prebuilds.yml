@@ -190,7 +190,6 @@ jobs:
                       ocl-icd-opencl-dev \
                       opencl-headers \
                       libvulkan-dev \
-                      vulkan-headers \
                       zlib1g-dev \
                       libjpeg-dev \
                       libpng-dev
