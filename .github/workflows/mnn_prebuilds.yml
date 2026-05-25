@@ -171,7 +171,7 @@ jobs:
                   path: ${{ env.PACKAGE }}.tar.gz
     linux-aarch64:
         needs: [setup]
-        runs-on: ubuntu-24.04-arm
+        runs-on: ubuntu-22.04-arm
         env:
             PACKAGE: mnn-${{ needs.setup.outputs.VERSION }}-linux-aarch64
         steps:
